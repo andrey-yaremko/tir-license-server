@@ -1,37 +1,45 @@
-from flask import Flask, request, jsonify, render_template
+from flask import Flask, request, jsonify, render_template, session
 from datetime import datetime, timedelta
-import psycopg2
+import sqlite3
 import hashlib
 import uuid
 import os
-import base64
-from urllib.parse import urlparse
+import secrets
 
 app = Flask(__name__)
+app.secret_key = secrets.token_hex(32)  # Випадковий ключ для сесій
 
-# 🔐 НАЛАШТУВАННЯ ДОСТУПУ ДО АДМІНКИ
-ADMIN_USERNAME = "admin"
+# Налаштування бази даних
+DATABASE = 'licenses.db'
+
+# 🔐 ПАРОЛЬ ДЛЯ АДМІНКИ
 ADMIN_PASSWORD = "Karnaval3e"  # ⚠️ ЗМІНІТЬ ЦЕЙ ПАРОЛЬ!
 
 def get_db_connection():
-    """Підключення до PostgreSQL"""
+    """Підключення до бази даних"""
     database_url = os.environ.get('DATABASE_URL')
     
     if database_url:
-        # Для Railway PostgreSQL
-        result = urlparse(database_url)
-        conn = psycopg2.connect(
-            database=result.path[1:],
-            user=result.username,
-            password=result.password,
-            host=result.hostname,
-            port=result.port
-        )
-    else:
-        # Для локальної розробки (SQLite)
-        import sqlite3
-        conn = sqlite3.connect('licenses.db')
+        # Спроба підключитися до PostgreSQL
+        try:
+            import psycopg2
+            from urllib.parse import urlparse
+            result = urlparse(database_url)
+            conn = psycopg2.connect(
+                database=result.path[1:],
+                user=result.username,
+                password=result.password,
+                host=result.hostname,
+                port=result.port
+            )
+            return conn
+        except ImportError:
+            # Якщо psycopg2 не встановлений, використовуємо SQLite
+            pass
     
+    # SQLite для локальної розробки або як запасний варіант
+    import sqlite3
+    conn = sqlite3.connect(DATABASE)
     return conn
 
 def init_database():
@@ -39,18 +47,18 @@ def init_database():
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    # Для PostgreSQL
+    # Для SQLite
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS licenses (
-            id SERIAL PRIMARY KEY,
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
             license_key TEXT UNIQUE NOT NULL,
             hwid TEXT,
             days INTEGER DEFAULT 30,
-            activated_at TIMESTAMP,
-            expires_at TIMESTAMP,
+            activated_at DATETIME,
+            expires_at DATETIME,
             status TEXT DEFAULT 'active',
-            last_check TIMESTAMP,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            last_check DATETIME,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
     
@@ -58,22 +66,9 @@ def init_database():
     conn.close()
     print("✅ База даних ініціалізована!")
 
-def check_auth(auth_header):
-    """Перевірка авторизації"""
-    if not auth_header:
-        return False
-    
-    try:
-        auth_type, credentials = auth_header.split(' ', 1)
-        if auth_type.lower() != 'basic':
-            return False
-        
-        decoded = base64.b64decode(credentials).decode('utf-8')
-        username, password = decoded.split(':', 1)
-        
-        return username == ADMIN_USERNAME and password == ADMIN_PASSWORD
-    except:
-        return False
+def check_admin_auth():
+    """Перевірка чи користувач авторизований"""
+    return session.get('admin_logged_in') == True
 
 @app.route('/')
 def home():
@@ -81,63 +76,34 @@ def home():
 
 @app.route('/admin')
 def admin_panel():
-    """Веб-адмінка з паролем"""
-    # Перевірка авторизації через URL параметр (для простоти)
-    auth_param = request.args.get('auth')
-    if auth_param:
-        try:
-            decoded = base64.b64decode(auth_param).decode('utf-8')
-            username, password = decoded.split(':', 1)
-            if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
-                return render_template('admin.html')
-        except:
-            pass
+    """Веб-адмінка"""
+    return render_template('admin.html')
+
+@app.route('/admin/login', methods=['POST'])
+def admin_login():
+    """Логін в адмінку"""
+    data = request.json
+    password = data.get('password')
     
-    # Якщо не авторизований - показуємо форму входу
-    return '''
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>TIR Bot - Вхід в адмінку</title>
-        <style>
-            body { font-family: Arial; margin: 50px; background: #f5f5f5; }
-            .login-box { background: white; padding: 30px; border-radius: 10px; max-width: 400px; margin: 0 auto; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
-            h1 { color: #2c3e50; text-align: center; }
-            input { width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #ddd; border-radius: 5px; }
-            button { background: #3498db; color: white; border: none; padding: 10px 20px; border-radius: 5px; width: 100%; cursor: pointer; }
-            button:hover { background: #2980b9; }
-            .error { color: red; text-align: center; margin-top: 10px; }
-        </style>
-    </head>
-    <body>
-        <div class="login-box">
-            <h1>🔐 Вхід в адмінку</h1>
-            <form onsubmit="login(event)">
-                <input type="text" id="username" placeholder="Логін" value="admin" required>
-                <input type="password" id="password" placeholder="Пароль" required>
-                <button type="submit">Увійти</button>
-            </form>
-            <div id="error" class="error"></div>
-        </div>
-        
-        <script>
-            function login(event) {
-                event.preventDefault();
-                const username = document.getElementById('username').value;
-                const password = document.getElementById('password').value;
-                const auth = btoa(username + ':' + password);
-                window.location.href = '/admin?auth=' + auth;
-            }
-            
-            // Показуємо помилку якщо була невдала спроба
-            const urlParams = new URLSearchParams(window.location.search);
-            if (urlParams.get('error')) {
-                document.getElementById('error').textContent = 'Невірний логін або пароль!';
-            }
-        </script>
-    </body>
-    </html>
-    '''
+    if password == ADMIN_PASSWORD:
+        session['admin_logged_in'] = True
+        return jsonify({"success": True, "message": "Успішний вхід"})
+    else:
+        return jsonify({"success": False, "message": "Невірний пароль"}), 401
+
+@app.route('/admin/logout', methods=['POST'])
+def admin_logout():
+    """Вийти з адмінки"""
+    session.pop('admin_logged_in', None)
+    return jsonify({"success": True, "message": "Вихід успішний"})
+
+@app.route('/admin/check_auth', methods=['GET'])
+def check_auth_status():
+    """Перевірити статус авторизації"""
+    if check_admin_auth():
+        return jsonify({"authenticated": True})
+    else:
+        return jsonify({"authenticated": False}), 401
 
 @app.route('/check_license', methods=['POST'])
 def check_license():
@@ -151,7 +117,7 @@ def check_license():
     
     cursor.execute('''
         SELECT * FROM licenses 
-        WHERE license_key = %s AND status = 'active'
+        WHERE license_key = ? AND status = 'active'
     ''', (license_key,))
     
     license_data = cursor.fetchone()
@@ -161,29 +127,29 @@ def check_license():
         return jsonify({"valid": False, "message": "Ліцензія не знайдена або неактивна"})
     
     # Перевіряємо HWID
-    license_id, license_key, stored_hwid, days, activated_at, expires_at, status, last_check, created_at = license_data
+    license_id, _, stored_hwid, days, activated_at, expires_at, status, last_check, created_at = license_data
     
     if stored_hwid and stored_hwid != hwid:
         conn.close()
         return jsonify({"valid": False, "message": "HWID не співпадає"})
     
     # Перевіряємо термін дії
-    if expires_at and datetime.now() > expires_at:
-        cursor.execute('UPDATE licenses SET status = %s WHERE id = %s', ('expired', license_id))
+    if expires_at and datetime.now() > datetime.fromisoformat(expires_at):
+        cursor.execute('UPDATE licenses SET status = "expired" WHERE id = ?', (license_id,))
         conn.commit()
         conn.close()
         return jsonify({"valid": False, "message": "Ліцензія протермінована"})
     
     # Оновлюємо останню перевірку
-    cursor.execute('UPDATE licenses SET last_check = %s WHERE id = %s', (datetime.now(), license_id))
+    cursor.execute('UPDATE licenses SET last_check = ? WHERE id = ?', (datetime.now(), license_id))
     conn.commit()
     conn.close()
     
     return jsonify({
         "valid": True,
         "message": "Ліцензія активна",
-        "expires_at": expires_at.isoformat() if expires_at else None,
-        "days_left": (expires_at - datetime.now()).days if expires_at else days
+        "expires_at": expires_at,
+        "days_left": (datetime.fromisoformat(expires_at) - datetime.now()).days if expires_at else days
     })
 
 @app.route('/activate', methods=['POST'])
@@ -196,14 +162,14 @@ def activate_license():
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    cursor.execute('SELECT * FROM licenses WHERE license_key = %s', (license_key,))
+    cursor.execute('SELECT * FROM licenses WHERE license_key = ?', (license_key,))
     license_data = cursor.fetchone()
     
     if not license_data:
         conn.close()
         return jsonify({"success": False, "message": "Невірний ключ ліцензії"})
     
-    license_id, license_key, stored_hwid, days, activated_at, expires_at, status, last_check, created_at = license_data
+    license_id, _, stored_hwid, days, activated_at, expires_at, status, last_check, created_at = license_data
     
     if status != 'active':
         conn.close()
@@ -219,8 +185,8 @@ def activate_license():
     
     cursor.execute('''
         UPDATE licenses 
-        SET hwid = %s, activated_at = %s, expires_at = %s, status = 'active'
-        WHERE id = %s
+        SET hwid = ?, activated_at = ?, expires_at = ?, status = 'active'
+        WHERE id = ?
     ''', (hwid, activated_time, expires_time, license_id))
     
     conn.commit()
@@ -235,7 +201,10 @@ def activate_license():
 
 @app.route('/admin/licenses', methods=['GET'])
 def get_all_licenses():
-    """Отримати всі ліцензії (для адмінки)"""
+    """Отримати всі ліцензії"""
+    if not check_admin_auth():
+        return jsonify({"error": "Не авторизовано"}), 401
+    
     conn = get_db_connection()
     cursor = conn.cursor()
     
@@ -252,11 +221,11 @@ def get_all_licenses():
             'license_key': license[1],
             'hwid': license[2],
             'days': license[3],
-            'activated_at': license[4].isoformat() if license[4] else None,
-            'expires_at': license[5].isoformat() if license[5] else None,
+            'activated_at': license[4],
+            'expires_at': license[5],
             'status': license[6],
-            'last_check': license[7].isoformat() if license[7] else None,
-            'created_at': license[8].isoformat() if license[8] else None
+            'last_check': license[7],
+            'created_at': license[8]
         })
     
     return jsonify(result)
@@ -264,6 +233,9 @@ def get_all_licenses():
 @app.route('/admin/create_license', methods=['POST'])
 def create_license():
     """Створити нову ліцензію"""
+    if not check_admin_auth():
+        return jsonify({"error": "Не авторизовано"}), 401
+    
     data = request.json
     days = data.get('days', 30)
     
@@ -275,7 +247,7 @@ def create_license():
     
     cursor.execute('''
         INSERT INTO licenses (license_key, days, status)
-        VALUES (%s, %s, 'active')
+        VALUES (?, ?, 'active')
     ''', (license_key, days))
     
     conn.commit()
@@ -291,10 +263,13 @@ def create_license():
 @app.route('/admin/delete_license/<int:license_id>', methods=['DELETE'])
 def delete_license(license_id):
     """Видалити ліцензію"""
+    if not check_admin_auth():
+        return jsonify({"error": "Не авторизовано"}), 401
+    
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    cursor.execute('DELETE FROM licenses WHERE id = %s', (license_id,))
+    cursor.execute('DELETE FROM licenses WHERE id = ?', (license_id,))
     conn.commit()
     conn.close()
     
@@ -303,6 +278,9 @@ def delete_license(license_id):
 @app.route('/admin/stats', methods=['GET'])
 def get_stats():
     """Отримати статистику"""
+    if not check_admin_auth():
+        return jsonify({"error": "Не авторизовано"}), 401
+    
     conn = get_db_connection()
     cursor = conn.cursor()
     
@@ -311,7 +289,7 @@ def get_stats():
     total = cursor.fetchone()[0]
     
     # Активні ліцензії
-    cursor.execute('SELECT COUNT(*) FROM licenses WHERE status = %s', ('active',))
+    cursor.execute('SELECT COUNT(*) FROM licenses WHERE status = "active"')
     active = cursor.fetchone()[0]
     
     # Активовані ліцензії
