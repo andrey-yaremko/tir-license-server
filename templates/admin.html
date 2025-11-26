@@ -6,7 +6,8 @@
     <style>
         body { 
             font-family: Arial, sans-serif; 
-            margin: 20px; 
+            margin: 0; 
+            padding: 20px; 
             background: #f5f5f5; 
         }
         .container { 
@@ -24,6 +25,42 @@
             border-radius: 5px; 
             margin-bottom: 20px; 
         }
+        .login-box {
+            max-width: 400px;
+            margin: 50px auto;
+            padding: 30px;
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            text-align: center;
+        }
+        .login-box input {
+            width: 100%;
+            padding: 12px;
+            margin: 10px 0;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            font-size: 16px;
+        }
+        .btn { 
+            background: #27ae60; 
+            color: white; 
+            border: none; 
+            padding: 12px 24px; 
+            border-radius: 5px; 
+            cursor: pointer; 
+            margin: 5px;
+            font-size: 14px;
+        }
+        .btn:hover { 
+            background: #219652; 
+        }
+        .btn-logout {
+            background: #e74c3c;
+        }
+        .btn-logout:hover {
+            background: #c0392b;
+        }
         .stats { 
             display: flex; 
             gap: 20px; 
@@ -38,25 +75,6 @@
             flex: 1; 
             text-align: center;
             min-width: 150px;
-        }
-        .btn { 
-            background: #27ae60; 
-            color: white; 
-            border: none; 
-            padding: 10px 20px; 
-            border-radius: 5px; 
-            cursor: pointer; 
-            margin: 5px;
-            font-size: 14px;
-        }
-        .btn:hover { 
-            background: #219652; 
-        }
-        .btn-copy {
-            background: #e67e22;
-        }
-        .btn-copy:hover {
-            background: #d35400;
         }
         table { 
             width: 100%; 
@@ -84,10 +102,6 @@
             color: red; 
             font-weight: bold; 
         }
-        .inactive {
-            color: orange;
-            font-weight: bold;
-        }
         .controls {
             margin: 20px 0;
             padding: 15px;
@@ -101,13 +115,38 @@
             border-radius: 3px;
             border: 1px solid #ddd;
         }
+        .error {
+            color: #e74c3c;
+            background: #ffeaa7;
+            padding: 10px;
+            border-radius: 5px;
+            margin: 10px 0;
+        }
+        .success {
+            color: #27ae60;
+            background: #d5f4e6;
+            padding: 10px;
+            border-radius: 5px;
+            margin: 10px 0;
+        }
     </style>
 </head>
 <body>
-    <div class="container">
+    <!-- Форма входу -->
+    <div id="loginForm" class="login-box">
+        <h1>🔐 TIR Bot Адмінка</h1>
+        <p>Введіть пароль для доступу</p>
+        <input type="password" id="adminPassword" placeholder="Пароль адмінки">
+        <button class="btn" onclick="adminLogin()" style="width: 100%;">Увійти</button>
+        <div id="loginError" class="error" style="display: none;"></div>
+    </div>
+
+    <!-- Адмін панель (прихована поки не увійде) -->
+    <div id="adminPanel" class="container" style="display: none;">
         <div class="header">
             <h1>🎮 TIR Bot - Панель управління</h1>
-            <p>Управління ліцензіями | Сервер: <span id="serverStatus">🟢 Працює</span></p>
+            <p>Управління ліцензіями | <span id="serverStatus">🟢 Працює</span></p>
+            <button class="btn btn-logout" onclick="adminLogout()">🚪 Вийти</button>
         </div>
 
         <div class="stats">
@@ -135,7 +174,6 @@
             <button class="btn" onclick="createLicense(7)">🆕 Створити ліцензію (7 днів)</button>
             <button class="btn" onclick="createLicense(1)">🆕 Створити ліцензію (1 день)</button>
             <button class="btn" onclick="refreshLicenses()">🔄 Оновити список</button>
-            <button class="btn" onclick="testServer()">🧪 Тест сервера</button>
         </div>
 
         <div>
@@ -163,54 +201,116 @@
     </div>
 
     <script>
-        // Конфігурація
-        const ADMIN_USERNAME = 'admin';
-        const ADMIN_PASSWORD = 'Karnaval3e'; // ⚠️ Змініть на ваш пароль!
-        
-        // Функція для створення заголовків авторизації
-        function getAuthHeaders() {
-            const auth = btoa(`${ADMIN_USERNAME}:${ADMIN_PASSWORD}`);
-            return {
-                'Content-Type': 'application/json',
-                'Authorization': `Basic ${auth}`
-            };
+        // Функції для роботи з API
+        async function apiCall(url, options = {}) {
+            try {
+                const response = await fetch(url, {
+                    credentials: 'include', // Важливо для сесій
+                    ...options
+                });
+                
+                if (response.status === 401) {
+                    showLoginForm();
+                    throw new Error('Не авторизовано');
+                }
+                
+                return await response.json();
+            } catch (error) {
+                console.error('API Error:', error);
+                throw error;
+            }
         }
 
-        // Завантаження списку ліцензій
-        function loadLicenses() {
+        // Авторизація
+        async function adminLogin() {
+            const password = document.getElementById('adminPassword').value;
+            const errorDiv = document.getElementById('loginError');
+            
+            if (!password) {
+                errorDiv.textContent = 'Введіть пароль';
+                errorDiv.style.display = 'block';
+                return;
+            }
+
+            try {
+                const result = await apiCall('/admin/login', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({password: password})
+                });
+
+                if (result.success) {
+                    showAdminPanel();
+                    loadLicenses();
+                } else {
+                    errorDiv.textContent = result.message;
+                    errorDiv.style.display = 'block';
+                }
+            } catch (error) {
+                errorDiv.textContent = 'Помилка з\'єднання';
+                errorDiv.style.display = 'block';
+            }
+        }
+
+        async function adminLogout() {
+            try {
+                await apiCall('/admin/logout', {method: 'POST'});
+                showLoginForm();
+            } catch (error) {
+                showLoginForm();
+            }
+        }
+
+        async function checkAuth() {
+            try {
+                const result = await apiCall('/admin/check_auth');
+                if (result.authenticated) {
+                    showAdminPanel();
+                    loadLicenses();
+                } else {
+                    showLoginForm();
+                }
+            } catch (error) {
+                showLoginForm();
+            }
+        }
+
+        // Відображення інтерфейсу
+        function showLoginForm() {
+            document.getElementById('loginForm').style.display = 'block';
+            document.getElementById('adminPanel').style.display = 'none';
+            document.getElementById('adminPassword').value = '';
+        }
+
+        function showAdminPanel() {
+            document.getElementById('loginForm').style.display = 'none';
+            document.getElementById('adminPanel').style.display = 'block';
+            document.getElementById('loginError').style.display = 'none';
+        }
+
+        // Робота з ліцензіями
+        async function loadLicenses() {
             showLoading();
             
-            fetch('/admin/licenses', {
-                headers: getAuthHeaders()
-            })
-            .then(response => {
-                if (!response.ok) {
-                    throw new Error(`Помилка сервера: ${response.status}`);
-                }
-                return response.json();
-            })
-            .then(licenses => {
+            try {
+                const licenses = await apiCall('/admin/licenses');
                 updateStats(licenses);
                 renderLicensesTable(licenses);
-            })
-            .catch(error => {
-                console.error('Помилка завантаження:', error);
-                showError('Помилка завантаження ліцензій: ' + error.message);
-            });
+            } catch (error) {
+                showError('Помилка завантаження ліцензій');
+            }
         }
 
-        // Оновлення статистики
         function updateStats(licenses) {
             document.getElementById('totalLicenses').textContent = licenses.length;
             document.getElementById('activeLicenses').textContent = 
-                licenses.filter(l => l.status === 'active' && (!l.hwid || l.hwid === 'Не активовано')).length;
+                licenses.filter(l => l.status === 'active').length;
             document.getElementById('inactiveLicenses').textContent = 
-                licenses.filter(l => l.status === 'active' && l.hwid && l.hwid !== 'Не активовано').length;
+                licenses.filter(l => l.status === 'active' && (!l.hwid)).length;
             document.getElementById('expiredLicenses').textContent = 
                 licenses.filter(l => l.status === 'expired').length;
         }
 
-        // Відображення таблиці ліцензій
         function renderLicensesTable(licenses) {
             const table = document.getElementById('licensesTable');
             
@@ -225,40 +325,68 @@
                     <td><span class="license-key">${license.license_key}</span></td>
                     <td>${license.hwid || 'Не активовано'}</td>
                     <td>${license.days}</td>
-                    <td class="${getStatusClass(license.status)}">${getStatusText(license.status)}</td>
+                    <td class="${license.status === 'active' ? 'active' : 'expired'}">
+                        ${license.status === 'active' ? 'Активна' : 'Протермінована'}
+                    </td>
                     <td>${formatDate(license.activated_at)}</td>
                     <td>${formatDate(license.created_at)}</td>
                     <td>
-                        <button class="btn btn-copy" onclick="copyKey('${license.license_key}')">📋 Копіювати</button>
+                        <button class="btn" onclick="copyKey('${license.license_key}')" style="background: #e67e22;">📋 Копіювати</button>
                         <button class="btn" onclick="deleteLicense(${license.id})" style="background: #e74c3c;">🗑️ Видалити</button>
                     </td>
                 </tr>
             `).join('');
         }
 
+        async function createLicense(days) {
+            if (!confirm(`Створити ліцензію на ${days} днів?`)) return;
+            
+            try {
+                const result = await apiCall('/admin/create_license', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ days: days })
+                });
+
+                if (result.success) {
+                    alert(`✅ Ліцензія створена: ${result.license_key}`);
+                    loadLicenses();
+                }
+            } catch (error) {
+                alert('❌ Помилка створення ліцензії');
+            }
+        }
+
+        async function deleteLicense(licenseId) {
+            if (!confirm('Видалити цю ліцензію? Цю дію не можна скасувати!')) return;
+            
+            try {
+                const result = await apiCall(`/admin/delete_license/${licenseId}`, {
+                    method: 'DELETE'
+                });
+
+                if (result.success) {
+                    alert('✅ Ліцензія видалена');
+                    loadLicenses();
+                }
+            } catch (error) {
+                alert('❌ Помилка видалення ліцензії');
+            }
+        }
+
+        function copyKey(key) {
+            navigator.clipboard.writeText(key).then(() => {
+                alert(`📋 Ключ скопійовано: ${key}`);
+            }).catch(err => {
+                alert('❌ Помилка копіювання');
+            });
+        }
+
+        function refreshLicenses() {
+            loadLicenses();
+        }
+
         // Допоміжні функції
-        function getStatusClass(status) {
-            switch(status) {
-                case 'active': return 'active';
-                case 'expired': return 'expired';
-                default: return 'inactive';
-            }
-        }
-
-        function getStatusText(status) {
-            switch(status) {
-                case 'active': return 'Активна';
-                case 'expired': return 'Протермінована';
-                default: return status;
-            }
-        }
-
-        function formatDate(dateString) {
-            if (!dateString) return '-';
-            const date = new Date(dateString);
-            return date.toLocaleString('uk-UA');
-        }
-
         function showLoading() {
             const table = document.getElementById('licensesTable');
             table.innerHTML = '<tr><td colspan="8" style="text-align: center;">Завантаження...</td></tr>';
@@ -269,91 +397,30 @@
             table.innerHTML = `<tr><td colspan="8" style="text-align: center; color: red;">${message}</td></tr>`;
         }
 
-        function showMessage(message, isError = false) {
-            alert(message);
+        function formatDate(dateString) {
+            if (!dateString) return '-';
+            const date = new Date(dateString);
+            return date.toLocaleDateString('uk-UA');
         }
 
-        // Основні функції
-        function createLicense(days) {
-            if (!confirm(`Створити ліцензію на ${days} днів?`)) return;
-            
-            fetch('/admin/create_license', {
-                method: 'POST',
-                headers: getAuthHeaders(),
-                body: JSON.stringify({ days: days })
-            })
-            .then(response => {
-                if (!response.ok) {
-                    throw new Error(`Помилка сервера: ${response.status}`);
-                }
-                return response.json();
-            })
-            .then(data => {
-                showMessage(`✅ Ліцензія створена: ${data.license_key}`);
-                loadLicenses();
-            })
-            .catch(error => {
-                console.error('Помилка створення:', error);
-                showMessage('❌ Помилка створення ліцензії: ' + error.message, true);
-            });
-        }
-
-        function deleteLicense(licenseId) {
-            if (!confirm('Видалити цю ліцензію? Цю дію не можна скасувати!')) return;
-            
-            fetch(`/admin/delete_license/${licenseId}`, {
-                method: 'DELETE',
-                headers: getAuthHeaders()
-            })
-            .then(response => {
-                if (!response.ok) {
-                    throw new Error(`Помилка сервера: ${response.status}`);
-                }
-                return response.json();
-            })
-            .then(data => {
-                showMessage('✅ Ліцензія видалена');
-                loadLicenses();
-            })
-            .catch(error => {
-                console.error('Помилка видалення:', error);
-                showMessage('❌ Помилка видалення ліцензії: ' + error.message, true);
-            });
-        }
-
-        function copyKey(key) {
-            navigator.clipboard.writeText(key).then(() => {
-                showMessage(`📋 Ключ скопійовано: ${key}`);
-            }).catch(err => {
-                console.error('Помилка копіювання:', err);
-                showMessage('❌ Помилка копіювання', true);
-            });
-        }
-
-        function refreshLicenses() {
-            loadLicenses();
-            showMessage('🔄 Список оновлено!');
-        }
-
-        function testServer() {
-            fetch('/')
-                .then(response => response.json())
-                .then(data => {
-                    showMessage(`✅ Сервер працює: ${data.message}`);
-                })
-                .catch(error => {
-                    showMessage('❌ Помилка з'єднання з сервером', true);
-                });
-        }
+        // Обробка Enter в полі пароля
+        document.getElementById('adminPassword').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                adminLogin();
+            }
+        });
 
         // Ініціалізація
         document.addEventListener('DOMContentLoaded', function() {
-            loadLicenses();
-            console.log('TIR Bot Admin Panel loaded');
+            checkAuth();
         });
 
         // Автоматичне оновлення кожні 30 секунд
-        setInterval(loadLicenses, 30000);
+        setInterval(() => {
+            if (document.getElementById('adminPanel').style.display !== 'none') {
+                loadLicenses();
+            }
+        }, 30000);
     </script>
 </body>
 </html>
