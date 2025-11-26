@@ -4,11 +4,33 @@ import sqlite3
 import hashlib
 import uuid
 import os
+import base64
 
 app = Flask(__name__)
 
 # Налаштування бази даних
 DATABASE = 'licenses.db'
+
+# 🔐 НАЛАШТУВАННЯ ДОСТУПУ ДО АДМІНКИ
+ADMIN_USERNAME = "admin"
+ADMIN_PASSWORD = "Karnaval3e"  # ⚠️ ЗМІНІТЬ ЦЕЙ ПАРОЛЬ!
+
+def check_auth(auth_header):
+    """Перевірка авторизації"""
+    if not auth_header:
+        return False
+    
+    try:
+        auth_type, credentials = auth_header.split(' ', 1)
+        if auth_type.lower() != 'basic':
+            return False
+        
+        decoded = base64.b64decode(credentials).decode('utf-8')
+        username, password = decoded.split(':', 1)
+        
+        return username == ADMIN_USERNAME and password == ADMIN_PASSWORD
+    except:
+        return False
 
 def init_database():
     """Ініціалізація бази даних"""
@@ -39,8 +61,63 @@ def home():
 
 @app.route('/admin')
 def admin_panel():
-    """Веб-адмінка"""
-    return render_template('admin.html')
+    """Веб-адмінка з паролем"""
+    # Перевірка авторизації через URL параметр (для простоти)
+    auth_param = request.args.get('auth')
+    if auth_param:
+        try:
+            decoded = base64.b64decode(auth_param).decode('utf-8')
+            username, password = decoded.split(':', 1)
+            if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
+                return render_template('admin.html')
+        except:
+            pass
+    
+    # Якщо не авторизований - показуємо форму входу
+    return '''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>TIR Bot - Вхід в адмінку</title>
+        <style>
+            body { font-family: Arial; margin: 50px; background: #f5f5f5; }
+            .login-box { background: white; padding: 30px; border-radius: 10px; max-width: 400px; margin: 0 auto; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
+            h1 { color: #2c3e50; text-align: center; }
+            input { width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #ddd; border-radius: 5px; }
+            button { background: #3498db; color: white; border: none; padding: 10px 20px; border-radius: 5px; width: 100%; cursor: pointer; }
+            button:hover { background: #2980b9; }
+            .error { color: red; text-align: center; margin-top: 10px; }
+        </style>
+    </head>
+    <body>
+        <div class="login-box">
+            <h1>🔐 Вхід в адмінку</h1>
+            <form onsubmit="login(event)">
+                <input type="text" id="username" placeholder="Логін" value="admin" required>
+                <input type="password" id="password" placeholder="Пароль" required>
+                <button type="submit">Увійти</button>
+            </form>
+            <div id="error" class="error"></div>
+        </div>
+        
+        <script>
+            function login(event) {
+                event.preventDefault();
+                const username = document.getElementById('username').value;
+                const password = document.getElementById('password').value;
+                const auth = btoa(username + ':' + password);
+                window.location.href = '/admin?auth=' + auth;
+            }
+            
+            // Показуємо помилку якщо була невдала спроба
+            const urlParams = new URLSearchParams(window.location.search);
+            if (urlParams.get('error')) {
+                document.getElementById('error').textContent = 'Невірний логін або пароль!';
+            }
+        </script>
+    </body>
+    </html>
+    '''
 
 @app.route('/check_license', methods=['POST'])
 def check_license():
