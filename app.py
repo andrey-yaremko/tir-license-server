@@ -1,19 +1,62 @@
 from flask import Flask, request, jsonify, render_template
 from datetime import datetime, timedelta
-import sqlite3
+import psycopg2
 import hashlib
 import uuid
 import os
 import base64
+from urllib.parse import urlparse
 
 app = Flask(__name__)
-
-# Налаштування бази даних
-DATABASE = 'licenses.db'
 
 # 🔐 НАЛАШТУВАННЯ ДОСТУПУ ДО АДМІНКИ
 ADMIN_USERNAME = "admin"
 ADMIN_PASSWORD = "Karnaval3e"  # ⚠️ ЗМІНІТЬ ЦЕЙ ПАРОЛЬ!
+
+def get_db_connection():
+    """Підключення до PostgreSQL"""
+    database_url = os.environ.get('DATABASE_URL')
+    
+    if database_url:
+        # Для Railway PostgreSQL
+        result = urlparse(database_url)
+        conn = psycopg2.connect(
+            database=result.path[1:],
+            user=result.username,
+            password=result.password,
+            host=result.hostname,
+            port=result.port
+        )
+    else:
+        # Для локальної розробки (SQLite)
+        import sqlite3
+        conn = sqlite3.connect('licenses.db')
+    
+    return conn
+
+def init_database():
+    """Ініціалізація бази даних"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    # Для PostgreSQL
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS licenses (
+            id SERIAL PRIMARY KEY,
+            license_key TEXT UNIQUE NOT NULL,
+            hwid TEXT,
+            days INTEGER DEFAULT 30,
+            activated_at TIMESTAMP,
+            expires_at TIMESTAMP,
+            status TEXT DEFAULT 'active',
+            last_check TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    conn.commit()
+    conn.close()
+    print("✅ База даних ініціалізована!")
 
 def check_auth(auth_header):
     """Перевірка авторизації"""
@@ -31,29 +74,6 @@ def check_auth(auth_header):
         return username == ADMIN_USERNAME and password == ADMIN_PASSWORD
     except:
         return False
-
-def init_database():
-    """Ініціалізація бази даних"""
-    conn = sqlite3.connect(DATABASE)
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS licenses (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            license_key TEXT UNIQUE NOT NULL,
-            hwid TEXT,
-            days INTEGER DEFAULT 30,
-            activated_at DATETIME,
-            expires_at DATETIME,
-            status TEXT DEFAULT 'active',
-            last_check DATETIME,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    
-    conn.commit()
-    conn.close()
-    print("✅ База даних ініціалізована!")
 
 @app.route('/')
 def home():
@@ -126,12 +146,12 @@ def check_license():
     license_key = data.get('license_key')
     hwid = data.get('hwid')
     
-    conn = sqlite3.connect(DATABASE)
+    conn = get_db_connection()
     cursor = conn.cursor()
     
     cursor.execute('''
         SELECT * FROM licenses 
-        WHERE license_key = ? AND status = 'active'
+        WHERE license_key = %s AND status = 'active'
     ''', (license_key,))
     
     license_data = cursor.fetchone()
@@ -141,29 +161,29 @@ def check_license():
         return jsonify({"valid": False, "message": "Ліцензія не знайдена або неактивна"})
     
     # Перевіряємо HWID
-    license_id, _, stored_hwid, days, activated_at, expires_at, status, last_check, created_at = license_data
+    license_id, license_key, stored_hwid, days, activated_at, expires_at, status, last_check, created_at = license_data
     
     if stored_hwid and stored_hwid != hwid:
         conn.close()
         return jsonify({"valid": False, "message": "HWID не співпадає"})
     
     # Перевіряємо термін дії
-    if expires_at and datetime.now() > datetime.fromisoformat(expires_at):
-        cursor.execute('UPDATE licenses SET status = "expired" WHERE id = ?', (license_id,))
+    if expires_at and datetime.now() > expires_at:
+        cursor.execute('UPDATE licenses SET status = %s WHERE id = %s', ('expired', license_id))
         conn.commit()
         conn.close()
         return jsonify({"valid": False, "message": "Ліцензія протермінована"})
     
     # Оновлюємо останню перевірку
-    cursor.execute('UPDATE licenses SET last_check = ? WHERE id = ?', (datetime.now(), license_id))
+    cursor.execute('UPDATE licenses SET last_check = %s WHERE id = %s', (datetime.now(), license_id))
     conn.commit()
     conn.close()
     
     return jsonify({
         "valid": True,
         "message": "Ліцензія активна",
-        "expires_at": expires_at,
-        "days_left": (datetime.fromisoformat(expires_at) - datetime.now()).days if expires_at else days
+        "expires_at": expires_at.isoformat() if expires_at else None,
+        "days_left": (expires_at - datetime.now()).days if expires_at else days
     })
 
 @app.route('/activate', methods=['POST'])
@@ -173,17 +193,17 @@ def activate_license():
     license_key = data.get('license_key')
     hwid = data.get('hwid')
     
-    conn = sqlite3.connect(DATABASE)
+    conn = get_db_connection()
     cursor = conn.cursor()
     
-    cursor.execute('SELECT * FROM licenses WHERE license_key = ?', (license_key,))
+    cursor.execute('SELECT * FROM licenses WHERE license_key = %s', (license_key,))
     license_data = cursor.fetchone()
     
     if not license_data:
         conn.close()
         return jsonify({"success": False, "message": "Невірний ключ ліцензії"})
     
-    license_id, _, stored_hwid, days, activated_at, expires_at, status, last_check, created_at = license_data
+    license_id, license_key, stored_hwid, days, activated_at, expires_at, status, last_check, created_at = license_data
     
     if status != 'active':
         conn.close()
@@ -199,8 +219,8 @@ def activate_license():
     
     cursor.execute('''
         UPDATE licenses 
-        SET hwid = ?, activated_at = ?, expires_at = ?, status = 'active'
-        WHERE id = ?
+        SET hwid = %s, activated_at = %s, expires_at = %s, status = 'active'
+        WHERE id = %s
     ''', (hwid, activated_time, expires_time, license_id))
     
     conn.commit()
@@ -216,7 +236,7 @@ def activate_license():
 @app.route('/admin/licenses', methods=['GET'])
 def get_all_licenses():
     """Отримати всі ліцензії (для адмінки)"""
-    conn = sqlite3.connect(DATABASE)
+    conn = get_db_connection()
     cursor = conn.cursor()
     
     cursor.execute('SELECT * FROM licenses ORDER BY created_at DESC')
@@ -232,11 +252,11 @@ def get_all_licenses():
             'license_key': license[1],
             'hwid': license[2],
             'days': license[3],
-            'activated_at': license[4],
-            'expires_at': license[5],
+            'activated_at': license[4].isoformat() if license[4] else None,
+            'expires_at': license[5].isoformat() if license[5] else None,
             'status': license[6],
-            'last_check': license[7],
-            'created_at': license[8]
+            'last_check': license[7].isoformat() if license[7] else None,
+            'created_at': license[8].isoformat() if license[8] else None
         })
     
     return jsonify(result)
@@ -250,12 +270,12 @@ def create_license():
     # Генерація унікального ключа
     license_key = f"TIR-{uuid.uuid4().hex[:8].upper()}-{uuid.uuid4().hex[:8].upper()}"
     
-    conn = sqlite3.connect(DATABASE)
+    conn = get_db_connection()
     cursor = conn.cursor()
     
     cursor.execute('''
         INSERT INTO licenses (license_key, days, status)
-        VALUES (?, ?, 'active')
+        VALUES (%s, %s, 'active')
     ''', (license_key, days))
     
     conn.commit()
@@ -271,10 +291,10 @@ def create_license():
 @app.route('/admin/delete_license/<int:license_id>', methods=['DELETE'])
 def delete_license(license_id):
     """Видалити ліцензію"""
-    conn = sqlite3.connect(DATABASE)
+    conn = get_db_connection()
     cursor = conn.cursor()
     
-    cursor.execute('DELETE FROM licenses WHERE id = ?', (license_id,))
+    cursor.execute('DELETE FROM licenses WHERE id = %s', (license_id,))
     conn.commit()
     conn.close()
     
@@ -283,7 +303,7 @@ def delete_license(license_id):
 @app.route('/admin/stats', methods=['GET'])
 def get_stats():
     """Отримати статистику"""
-    conn = sqlite3.connect(DATABASE)
+    conn = get_db_connection()
     cursor = conn.cursor()
     
     # Загальна кількість ліцензій
@@ -291,7 +311,7 @@ def get_stats():
     total = cursor.fetchone()[0]
     
     # Активні ліцензії
-    cursor.execute('SELECT COUNT(*) FROM licenses WHERE status = "active"')
+    cursor.execute('SELECT COUNT(*) FROM licenses WHERE status = %s', ('active',))
     active = cursor.fetchone()[0]
     
     # Активовані ліцензії
