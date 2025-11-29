@@ -115,6 +115,7 @@ def init_database():
                 )
             ''')
         conn.commit()
+        print("✅ Database initialized/checked")
     except Exception as e:
         print(f"⚠️ Init DB: {e}")
     finally:
@@ -283,9 +284,19 @@ def activate_license():
         
     return jsonify({"success": True, "expires_at": exp.isoformat(), "days": days})
 
-def create_app():
-    init_database()
-    return app
+# === СТВОРЕННЯ БАЗИ (ЗАПУСКАЄТЬСЯ АВТОМАТИЧНО) ===
+init_database()
+
+# === КНОПКА ПОРЯТУНКУ (Очищення поламаної бази) ===
+@app.route('/admin/reset_db_force')
+def reset_db_force():
+    if not session.get('admin_logged_in'): return "Спочатку увійдіть в адмінку!", 403
+    try:
+        execute_query('DROP TABLE IF EXISTS licenses', commit=True)
+        init_database()
+        return "✅ База даних успішно перестворена! Тепер спробуйте створити ліцензію."
+    except Exception as e:
+        return f"Помилка: {e}", 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
