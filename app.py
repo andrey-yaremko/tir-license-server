@@ -1,390 +1,322 @@
-import customtkinter as ctk
-from PIL import Image, ImageTk
-import requests
-import json
+from flask import Flask, request, jsonify, render_template, session, redirect, url_for
+from datetime import datetime, timedelta
+import sqlite3
 import hashlib
 import uuid
 import os
-import sys
-import subprocess
-import threading
-import zipfile
-import shutil
-from datetime import datetime
+import secrets
+import boto3
+from botocore.config import Config
 
-# 🎨 КОЛЬОРИ
-COLOR_PRIMARY_DARK = "#1a1a1a"
-COLOR_BACKGROUND_DARK = "#0d0d0d"
-COLOR_SURFACE_DARK = "#2d2d2d"
-COLOR_ON_SURFACE_DARK = "#ffffff"
-COLOR_TEXT_SECONDARY = "#888888"
-COLOR_ACCENT_GREEN = "#2e7d32"
-COLOR_OUTLINE_DARK = "#404040"
-COLOR_ACTIVE_ITEM = "#3d3d3d"
-COLOR_BUTTON_ACTIVE = "#2e7d32"
-COLOR_START_ACTIVE = "#d32f2f"
-COLOR_BUTTON_LIGHTER = "#3d3d3d"
-COLOR_BORDER_ACTIVE = "#4CAF50"
+app = Flask(__name__)
+app.secret_key = secrets.token_hex(32)
 
-# 🌐 НАЛАШТУВАННЯ СЕРВЕРА
-SERVER_URL = "https://web-production-83b9.up.railway.app"
+# === НАЛАШТУВАННЯ ЗМІННИХ (З Railway) ===
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD")
+B2_KEY_ID = os.environ.get("B2_KEY_ID")
+B2_APP_KEY = os.environ.get("B2_APP_KEY")
+B2_BUCKET_NAME = os.environ.get("B2_BUCKET_NAME")
+B2_ENDPOINT = os.environ.get("B2_ENDPOINT", "https://s3.us-west-004.backblazeb2.com")
 
-class TIRLauncher:
-    def __init__(self):
-        print("🎮 Запуск TIR Bot Launcher (Final Release)...")
-        
-        ctk.set_appearance_mode("Dark")
-        ctk.set_default_color_theme("blue")
-        
-        self.root = ctk.CTk()
-        self.root.title("TIR Bot Launcher")
-        self.root.geometry("500x650")
-        self.root.resizable(False, False)
-        
-        # === 🔧 ВАЖЛИВЕ ВИПРАВЛЕННЯ ШЛЯХІВ ===
-        # Це гарантує, що файли зберігаються поруч з EXE, а не в тимчасовій папці
-        if getattr(sys, 'frozen', False):
-            self.launcher_dir = os.path.dirname(sys.executable)
-        else:
-            self.launcher_dir = os.path.dirname(os.path.abspath(__file__))
-            
-        print(f"📁 Робоча папка: {self.launcher_dir}")
+# === B2 CLIENT (BACKBLAZE) ===
+s3_client = None
+try:
+    if B2_KEY_ID and B2_APP_KEY:
+        s3_client = boto3.client(
+            's3', endpoint_url=B2_ENDPOINT,
+            aws_access_key_id=B2_KEY_ID, aws_secret_access_key=B2_APP_KEY,
+            config=Config(signature_version='s3v4')
+        )
+        print("✅ B2 Client ініціалізовано")
+except Exception as e:
+    print(f"⚠️ B2 Error: {e}")
 
-        # Стани
-        self.license_key = ""
-        self.hwid = self.generate_hwid()
-        self.is_activated = False
-        self.activation_data = {}
-        self.bot_downloaded = False
-        self.drivers_installed = False
-        
-        # 🎯 ШЛЯХИ
-        self.bot_dir = os.path.join(self.launcher_dir, "TIR_Bot_Full")
-        self.bot_executable = "TIR_Bot.exe"
-        self.bot_full_path = os.path.join(self.bot_dir, self.bot_executable)
-        self.drivers_dir = os.path.join(self.bot_dir, "Drivers")
-        self.install_drivers_bat = os.path.join(self.drivers_dir, "install_drivers.bat")
-        
-        # Завантаження налаштувань
-        self.load_activation_state()
-        
-        # Перевірка файлів
-        self.check_bot_downloaded()
-        
-        # GUI
-        self.setup_gui()
-        
-        if self.is_activated:
-            self.show_main_screen()
+# === РОБОТА З БАЗОЮ ДАНИХ (УНІВЕРСАЛЬНА) ===
 
-    def check_bot_downloaded(self):
-        self.bot_downloaded = os.path.exists(self.bot_full_path)
-        if self.bot_downloaded:
-            print("✅ Файли бота знайдені")
-        else:
-            print("📥 Файли бота відсутні")
-
-    def generate_hwid(self):
+def get_db_connection():
+    """Підключення: якщо є DATABASE_URL -> Postgres, інакше -> SQLite"""
+    database_url = os.environ.get('DATABASE_URL')
+    if database_url:
         try:
-            import platform
-            import psutil
-            system_info = f"{platform.node()}{platform.processor()}{psutil.disk_partitions()[0].device}"
-            hwid = hashlib.md5(system_info.encode()).hexdigest()
-            return hwid
-        except:
-            return hashlib.md5(str(uuid.getnode()).encode()).hexdigest()
-
-    def load_activation_state(self):
-        try:
-            activation_file = os.path.join(self.launcher_dir, "activation.json")
-            if os.path.exists(activation_file):
-                with open(activation_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    self.license_key = data.get("license_key", "")
-                    
-                    # Перевіряємо HWID (захист від копіювання файлу на інший ПК)
-                    if data.get("hwid") == self.hwid:
-                        self.is_activated = data.get("is_activated", False)
-                        self.activation_data = data.get("activation_data", {})
-                        self.drivers_installed = data.get("drivers_installed", False)
-                    else:
-                        print("⚠️ HWID змінився, потрібна повторна активація")
-        except Exception as e:
-            print(f"❌ Помилка завантаження конфігу: {e}")
-
-    def save_activation_state(self):
-        try:
-            activation_file = os.path.join(self.launcher_dir, "activation.json")
-            data = {
-                "license_key": self.license_key,
-                "hwid": self.hwid,
-                "is_activated": self.is_activated,
-                "activation_data": self.activation_data,
-                "last_check": datetime.now().isoformat(),
-                "drivers_installed": self.drivers_installed
-            }
-            with open(activation_file, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-        except Exception as e:
-            print(f"❌ Помилка збереження конфігу: {e}")
-
-    def setup_gui(self):
-        main_frame = ctk.CTkFrame(self.root, fg_color=COLOR_BACKGROUND_DARK, corner_radius=0)
-        main_frame.pack(fill="both", expand=True, padx=0, pady=0)
-
-        app_bar = ctk.CTkFrame(main_frame, fg_color=COLOR_PRIMARY_DARK, height=60, corner_radius=0)
-        app_bar.pack(fill='x')
-        app_bar.pack_propagate(False)
-
-        title_label = ctk.CTkLabel(app_bar, text="TIR Bot Launcher", text_color=COLOR_ON_SURFACE_DARK, fg_color=COLOR_PRIMARY_DARK, font=("Inter", 16, "bold"))
-        title_label.pack(side="left", padx=20, pady=10)
-
-        self.content_frame = ctk.CTkFrame(main_frame, fg_color=COLOR_BACKGROUND_DARK, corner_radius=0)
-        self.content_frame.pack(fill='both', expand=True, padx=20, pady=20)
-
-        if not self.is_activated:
-            self.show_activation_screen()
-        else:
-            self.show_main_screen()
-
-    def show_activation_screen(self):
-        for widget in self.content_frame.winfo_children(): widget.destroy()
-
-        main_card = ctk.CTkFrame(self.content_frame, fg_color=COLOR_PRIMARY_DARK, corner_radius=12)
-        main_card.pack(fill='x', pady=10, padx=0)
-
-        ctk.CTkLabel(main_card, text="🔐 АКТИВАЦІЯ TIR BOT", text_color=COLOR_ON_SURFACE_DARK, font=("Inter", 18, "bold")).pack(pady=(20, 10))
-        ctk.CTkLabel(main_card, text="Введіть ваш ключ ліцензії", text_color=COLOR_TEXT_SECONDARY).pack(pady=(0, 20))
-
-        self.key_entry = ctk.CTkEntry(main_card, placeholder_text="Введіть ключ...", width=400, height=45)
-        self.key_entry.pack(pady=10, padx=20)
-        self.key_entry.bind('<Return>', lambda e: self.activate_license())
-        
-        self.activate_button = ctk.CTkButton(main_card, text="🎮 АКТИВУВАТИ", fg_color=COLOR_BUTTON_ACTIVE, height=45, command=self.activate_license)
-        self.activate_button.pack(pady=10, padx=20, fill='x')
-
-        self.status_label = ctk.CTkLabel(main_card, text="", text_color=COLOR_TEXT_SECONDARY)
-        self.status_label.pack(pady=(10, 20))
-
-        ctk.CTkLabel(self.content_frame, text=f"HWID: {self.hwid}", text_color="gray", font=("Arial", 10)).pack(side="bottom", pady=10)
-
-    def show_main_screen(self):
-        for widget in self.content_frame.winfo_children(): widget.destroy()
-
-        main_card = ctk.CTkFrame(self.content_frame, fg_color=COLOR_PRIMARY_DARK, corner_radius=12)
-        main_card.pack(fill='x', pady=10, padx=0)
-
-        ctk.CTkLabel(main_card, text="✅ TIR BOT АКТИВОВАНО", text_color=COLOR_ACCENT_GREEN, font=("Inter", 18, "bold")).pack(pady=(20, 10))
-
-        lic_info = self.activation_data.get('license_info', {})
-        expires_at = lic_info.get('expires_at', 'Невідомо')
-        days_left = lic_info.get('days_left', 'Невідомо')
-        
-        # Обробка формату дати (обрізаємо час)
-        if "T" in str(expires_at): expires_at = str(expires_at).split("T")[0]
-
-        drivers_status = "✅ Встановлені" if self.drivers_installed else "📥 Потрібно встановити"
-        
-        info_text = f"📅 Дійсна до: {expires_at}\n⏰ Днів: {days_left}\n🔑 Ключ: {self.license_key[:10]}...\n🔌 Драйвера: {drivers_status}"
-        
-        ctk.CTkLabel(main_card, text=info_text, justify="left").pack(pady=10, padx=20)
-
-        if not self.bot_downloaded:
-            self.progress_bar = ctk.CTkProgressBar(main_card, progress_color=COLOR_ACCENT_GREEN)
-            self.progress_bar.pack(pady=10, padx=20, fill='x')
-            self.progress_bar.set(0)
-            self.progress_label = ctk.CTkLabel(main_card, text="Готово до завантаження")
-            self.progress_label.pack(pady=(0, 10))
-
-        btn_text = "🚀 ЗАПУСТИТИ TIR BOT" if self.bot_downloaded else "📥 ЗАВАНТАЖИТИ ТА ЗАПУСТИТИ"
-        self.launch_button = ctk.CTkButton(main_card, text=btn_text, fg_color=COLOR_BUTTON_ACTIVE, height=50, font=("Inter", 14, "bold"), command=self.launch_bot)
-        self.launch_button.pack(pady=20, padx=20, fill='x')
-
-        ctk.CTkButton(main_card, text="🔄 ПЕРЕВІРИТИ СТАТУС", fg_color=COLOR_SURFACE_DARK, command=self.check_license_status).pack(pady=(0, 10), padx=20, fill='x')
-        ctk.CTkButton(main_card, text="🗑️ ДЕАКТИВУВАТИ", fg_color=COLOR_START_ACTIVE, command=self.deactivate_license).pack(pady=(0, 20), padx=20, fill='x')
-        
-        self.status_label = ctk.CTkLabel(main_card, text="")
-        self.status_label.pack(pady=(0, 20))
-
-    def activate_license(self):
-        key = self.key_entry.get().strip()
-        if not key: return
-        
-        self.update_status("⏳ Активація...", "#FF9800")
-        self.activate_button.configure(state="disabled")
-        threading.Thread(target=self._activate_license_thread, args=(key,), daemon=True).start()
-
-    def _activate_license_thread(self, license_key):
-        try:
-            response = requests.post(f"{SERVER_URL}/activate", json={"license_key": license_key, "hwid": self.hwid}, timeout=10)
-            data = response.json()
-            
-            if response.status_code == 200 and data.get("success"):
-                self.license_key = license_key
-                self.is_activated = True
-                self.activation_data = {"license_info": data}
-                self.save_activation_state()
-                self.root.after(0, lambda: self.update_status("✅ Ліцензія активована!", COLOR_ACCENT_GREEN))
-                self.root.after(1000, self.show_main_screen)
-            else:
-                self.root.after(0, lambda: self.update_status(f"❌ {data.get('message', 'Помилка')}", COLOR_START_ACTIVE))
-        except:
-            self.root.after(0, lambda: self.update_status("❌ Помилка з'єднання", COLOR_START_ACTIVE))
-        finally:
-            self.root.after(0, lambda: self.activate_button.configure(state="normal"))
-
-    def check_license_status(self):
-        self.update_status("⏳ Перевірка...", "#FF9800")
-        def _run():
-            try:
-                resp = requests.post(f"{SERVER_URL}/check_license", json={"license_key": self.license_key, "hwid": self.hwid})
-                if resp.json().get("valid"):
-                    self.root.after(0, lambda: self.update_status("✅ Активна", COLOR_ACCENT_GREEN))
-                else:
-                    self.root.after(0, lambda: self.update_status("❌ Недійсна", COLOR_START_ACTIVE))
-            except:
-                self.root.after(0, lambda: self.update_status("❌ Помилка", COLOR_START_ACTIVE))
-        threading.Thread(target=_run, daemon=True).start()
-
-    def deactivate_license(self):
-        self.is_activated = False
-        self.license_key = ""
-        self.bot_downloaded = False
-        
-        # Видаляємо папку бота (опціонально)
-        if os.path.exists(self.bot_dir):
-            try: shutil.rmtree(self.bot_dir)
-            except: pass
-            
-        # Видаляємо файл активації
-        activation_file = os.path.join(self.launcher_dir, "activation.json")
-        if os.path.exists(activation_file):
-            try: os.remove(activation_file)
-            except: pass
-            
-        self.show_activation_screen()
-
-    def launch_bot(self):
-        if not self.bot_downloaded:
-            self.update_status("📥 Отримання посилання...", "#2196F3")
-            self.launch_button.configure(state="disabled")
-            threading.Thread(target=self.download_and_launch_bot, daemon=True).start()
-        else:
-            self.update_status("🚀 Запуск...", "#2196F3")
-            self.launch_button.configure(state="disabled")
-            threading.Thread(target=self._launch_bot_thread, daemon=True).start()
-
-    def download_and_launch_bot(self):
-        try:
-            self.update_progress(10, "Авторизація...")
-            
-            # Отримання посилання від сервера
-            response = requests.post(
-                f"{SERVER_URL}/get_download_link",
-                json={"license_key": self.license_key, "hwid": self.hwid},
-                timeout=15
+            import psycopg2
+            from urllib.parse import urlparse
+            r = urlparse(database_url)
+            return psycopg2.connect(
+                database=r.path[1:], user=r.username, password=r.password,
+                host=r.hostname, port=r.port
             )
+        except ImportError: pass
+    return sqlite3.connect('licenses.db')
+
+def execute_query(query, params=(), fetch_one=False, fetch_all=False, commit=False):
+    """Розумна функція: сама міняє '?' на '%s' для Postgres"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    # Визначаємо, чи це Postgres
+    is_pg = 'psycopg2' in str(type(cursor)) or 'psycopg2' in str(type(conn))
+    
+    # Адаптація: Postgres використовує %s замість ?
+    if is_pg:
+        query = query.replace('?', '%s')
+    
+    try:
+        cursor.execute(query, params)
+        
+        result = None
+        if fetch_one:
+            result = cursor.fetchone()
+        elif fetch_all:
+            result = cursor.fetchall()
             
-            if response.status_code != 200:
-                raise Exception(response.json().get("message", "Помилка сервера"))
+        if commit:
+            conn.commit()
             
-            download_url = response.json().get("download_url")
-            
-            # Підготовка
-            if os.path.exists(self.bot_dir): shutil.rmtree(self.bot_dir)
-            
-            zip_path = os.path.join(self.launcher_dir, "TIR_Bot_Full.zip")
-            if os.path.exists(zip_path): os.remove(zip_path)
+        return result
+    except Exception as e:
+        print(f"🔥 SQL Error: {e}")
+        if commit: conn.rollback()
+        raise e
+    finally:
+        conn.close()
 
-            # Завантаження
-            self.update_progress(20, "Завантаження файлу...")
-            with requests.get(download_url, stream=True) as r:
-                r.raise_for_status()
-                total_size = int(r.headers.get('content-length', 0))
-                downloaded = 0
-                
-                with open(zip_path, 'wb') as f:
-                    for chunk in r.iter_content(chunk_size=8192):
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        if total_size > 0:
-                            progress = 20 + (downloaded / total_size) * 50
-                            mb = downloaded // 1024 // 1024
-                            self.update_progress(progress, f"Завантаження: {mb}MB")
+def init_database():
+    """Створення таблиць"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    is_pg = 'psycopg2' in str(type(cursor)) or 'psycopg2' in str(type(conn))
+    
+    try:
+        if is_pg:
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS licenses (
+                    id SERIAL PRIMARY KEY,
+                    license_key TEXT UNIQUE NOT NULL,
+                    hwid TEXT,
+                    days INTEGER DEFAULT 30,
+                    activated_at TIMESTAMP,
+                    expires_at TIMESTAMP,
+                    status TEXT DEFAULT 'active',
+                    last_check TIMESTAMP,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+        else:
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS licenses (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    license_key TEXT UNIQUE NOT NULL,
+                    hwid TEXT,
+                    days INTEGER DEFAULT 30,
+                    activated_at DATETIME,
+                    expires_at DATETIME,
+                    status TEXT DEFAULT 'active',
+                    last_check DATETIME,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+        conn.commit()
+        print("✅ База даних перевірена/створена")
+    except Exception as e:
+        print(f"⚠️ Init DB Error: {e}")
+    finally:
+        conn.close()
 
-            # Розпаковка
-            self.update_progress(75, "Розпаковка архіву...")
-            if not zipfile.is_zipfile(zip_path):
-                raise Exception("Файл пошкоджено")
-                
-            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                zip_ref.extractall(self.launcher_dir)
-            
-            os.remove(zip_path)
+# === АДМІНКА ===
 
-            if not os.path.exists(self.bot_full_path):
-                raise Exception("EXE файл не знайдено після розпаковки")
+@app.route('/')
+def home():
+    return jsonify({"message": "TIR Bot License Server", "status": "running"})
 
-            self.bot_downloaded = True
-            self.update_progress(100, "Завантаження завершено!")
-            self.root.after(0, lambda: self.update_status("✅ Завантажено!", COLOR_ACCENT_GREEN))
-            self.root.after(1000, self._launch_bot_thread)
+@app.route('/admin')
+def admin_panel():
+    return render_template('admin.html')
 
-        except Exception as e:
-            self.root.after(0, lambda: self.update_status(f"❌ Помилка: {str(e)}", COLOR_START_ACTIVE))
-            self.root.after(0, lambda: self.launch_button.configure(state="normal"))
+@app.route('/admin/login', methods=['POST'])
+def admin_login():
+    data = request.json
+    password = data.get('password')
+    # Якщо змінна не задана, використовуємо старий пароль (для сумісності)
+    admin_pass = ADMIN_PASSWORD if ADMIN_PASSWORD else "Karnaval3e"
+    
+    if password == admin_pass:
+        session['admin_logged_in'] = True
+        return jsonify({"success": True})
+    return jsonify({"success": False, "message": "Невірний пароль"}), 401
 
-    def _launch_bot_thread(self):
+@app.route('/admin/logout', methods=['POST'])
+def admin_logout():
+    session.pop('admin_logged_in', None)
+    return jsonify({"success": True})
+
+@app.route('/admin/check_auth', methods=['GET'])
+def check_auth_status():
+    return jsonify({"authenticated": session.get('admin_logged_in') == True})
+
+@app.route('/admin/licenses', methods=['GET'])
+def get_all_licenses():
+    if not session.get('admin_logged_in'): return jsonify({"error": "Auth failed"}), 401
+    try:
+        rows = execute_query('SELECT * FROM licenses ORDER BY created_at DESC', fetch_all=True)
+        result = []
+        for r in rows:
+            result.append({
+                'id': r[0], 'license_key': r[1], 'hwid': r[2], 'days': r[3],
+                'activated_at': r[4], 'expires_at': r[5], 'status': r[6],
+                'last_check': r[7], 'created_at': r[8]
+            })
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/admin/create_license', methods=['POST'])
+def create_license():
+    if not session.get('admin_logged_in'): return jsonify({"error": "Auth failed"}), 401
+    data = request.json
+    days = data.get('days', 30)
+    key = f"TIR-{uuid.uuid4().hex[:8].upper()}-{uuid.uuid4().hex[:8].upper()}"
+    
+    try:
+        execute_query(
+            'INSERT INTO licenses (license_key, days, status) VALUES (?, ?, ?)',
+            (key, days, 'active'), commit=True
+        )
+        return jsonify({"success": True, "license_key": key, "days": days})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+@app.route('/admin/delete_license/<int:id>', methods=['DELETE'])
+def delete_license(id):
+    if not session.get('admin_logged_in'): return jsonify({"error": "Auth failed"}), 401
+    execute_query('DELETE FROM licenses WHERE id = ?', (id,), commit=True)
+    return jsonify({"success": True})
+
+@app.route('/admin/stats', methods=['GET'])
+def get_stats():
+    if not session.get('admin_logged_in'): return jsonify({"error": "Auth failed"}), 401
+    try:
+        total = execute_query('SELECT COUNT(*) FROM licenses', fetch_one=True)[0]
+        active = execute_query("SELECT COUNT(*) FROM licenses WHERE status = 'active'", fetch_one=True)[0]
+        activated = execute_query('SELECT COUNT(*) FROM licenses WHERE hwid IS NOT NULL', fetch_one=True)[0]
+        return jsonify({"total_licenses": total, "active_licenses": active, "activated_licenses": activated})
+    except:
+        return jsonify({"total_licenses": 0, "active_licenses": 0, "activated_licenses": 0})
+
+# === КЛІЄНТСЬКІ ЗАПИТИ (ЛАУНЧЕР) ===
+
+@app.route('/get_download_link', methods=['POST'])
+def get_download_link():
+    data = request.json
+    key, hwid = data.get('license_key'), data.get('hwid')
+    
+    row = execute_query('SELECT hwid, status, expires_at FROM licenses WHERE license_key = ?', (key,), fetch_one=True)
+    if not row: return jsonify({"message": "Ліцензія не знайдена"}), 403
+    
+    stored_hwid, status, expires_at = row
+    
+    if status != 'active': return jsonify({"message": "Ліцензія неактивна"}), 403
+    if stored_hwid != hwid: return jsonify({"message": "HWID не співпадає"}), 403
+    
+    # Перевірка терміну (безпечна для рядків і дат)
+    if expires_at:
         try:
-            # Перевіряємо драйвери тільки якщо вони ще не встановлені
-            if not self.drivers_installed:
-                self.update_status("🔧 Встановлення драйверів...", "#FF9800")
-                if self._install_arduino_drivers():
-                    self.drivers_installed = True
-                    self.save_activation_state()
-            
-            self._run_bot_file(self.bot_executable)
-            
-        except Exception as e:
-            self.root.after(0, lambda: self.update_status(f"❌ Error: {e}", COLOR_START_ACTIVE))
-        finally:
-            self.root.after(3000, lambda: self.launch_button.configure(state="normal"))
+            exp_dt = expires_at if isinstance(expires_at, datetime) else datetime.fromisoformat(str(expires_at))
+            if datetime.now() > exp_dt:
+                 return jsonify({"message": "Термін дії вийшов"}), 403
+        except: pass 
 
-    def _install_arduino_drivers(self):
+    if not s3_client: return jsonify({"message": "S3 не налаштовано"}), 500
+    
+    try:
+        url = s3_client.generate_presigned_url(
+            ClientMethod='get_object',
+            Params={'Bucket': B2_BUCKET_NAME, 'Key': 'TIR_Bot_Full.zip'},
+            ExpiresIn=300
+        )
+        return jsonify({"download_url": url})
+    except Exception as e:
+        return jsonify({"message": f"B2 Error: {e}"}), 500
+
+@app.route('/check_license', methods=['POST'])
+def check_license():
+    data = request.json
+    key, hwid = data.get('license_key'), data.get('hwid')
+    
+    row = execute_query('SELECT id, hwid, days, expires_at, status FROM licenses WHERE license_key = ?', (key,), fetch_one=True)
+    if not row: return jsonify({"valid": False, "message": "Не знайдено"})
+    
+    lid, stored_hwid, days, expires_at, status = row
+    
+    if status != 'active': return jsonify({"valid": False, "message": "Неактивна"})
+    if stored_hwid and stored_hwid != hwid: return jsonify({"valid": False, "message": "Інший HWID"})
+    
+    # Перевірка протермінування
+    is_expired = False
+    exp_dt = None
+    if expires_at:
         try:
-            if not os.path.exists(self.install_drivers_bat): return False
-            process = subprocess.Popen(
-                ['cmd.exe', '/c', self.install_drivers_bat],
-                cwd=self.drivers_dir,
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.PIPE,
-                creationflags=subprocess.CREATE_NO_WINDOW
-            )
-            process.communicate(timeout=60)
-            return process.returncode == 0
-        except: return False
+            exp_dt = expires_at if isinstance(expires_at, datetime) else datetime.fromisoformat(str(expires_at))
+            if datetime.now() > exp_dt: is_expired = True
+        except: pass
 
-    def _run_bot_file(self, bot_file):
-        try:
-            if not os.path.exists(self.bot_full_path): raise Exception("Файл не знайдено")
-            subprocess.Popen([self.bot_full_path], creationflags=subprocess.CREATE_NO_WINDOW)
-            self.root.after(0, lambda: self.update_status("✅ TIR Bot запущено!", COLOR_ACCENT_GREEN))
-            return True
-        except Exception as e:
-            print(f"Error launching: {e}")
-            return False
+    if is_expired:
+        execute_query("UPDATE licenses SET status = 'expired' WHERE id = ?", (lid,), commit=True)
+        return jsonify({"valid": False, "message": "Протермінована"})
+    
+    execute_query("UPDATE licenses SET last_check = ? WHERE id = ?", (datetime.now(), lid), commit=True)
+    
+    days_left = (exp_dt - datetime.now()).days if exp_dt else days
+    return jsonify({"valid": True, "message": "Активна", "expires_at": expires_at, "days_left": days_left})
 
-    def update_progress(self, value, text):
-        if hasattr(self, 'progress_bar'):
-            self.root.after(0, lambda: self.progress_bar.set(value/100))
-            self.root.after(0, lambda: self.progress_label.configure(text=text))
+@app.route('/activate', methods=['POST'])
+def activate_license():
+    data = request.json
+    key, hwid = data.get('license_key'), data.get('hwid')
+    
+    row = execute_query('SELECT id, hwid, days, status, expires_at FROM licenses WHERE license_key = ?', (key,), fetch_one=True)
+    if not row: return jsonify({"success": False, "message": "Невірний ключ"})
+    
+    lid, stored_hwid, days, status, expires_at = row
+    
+    if status != 'active': return jsonify({"success": False, "message": "Неактивна"})
+    if stored_hwid and stored_hwid != hwid: return jsonify({"success": False, "message": "Вже активовано"})
+    
+    now = datetime.now()
+    
+    # Логіка визначення дати закінчення
+    if not expires_at:
+        exp = now + timedelta(days=days)
+        execute_query(
+            "UPDATE licenses SET hwid = ?, activated_at = ?, expires_at = ?, status = 'active' WHERE id = ?",
+            (hwid, now, exp, lid), commit=True
+        )
+    else:
+        # Якщо вже була дата, залишаємо її
+        execute_query("UPDATE licenses SET hwid = ? WHERE id = ?", (hwid, lid), commit=True)
+        exp = expires_at
+    
+    # 🔥 FIX: Безпечна конвертація дати у рядок
+    try:
+        exp_str = exp.isoformat() if isinstance(exp, datetime) else str(exp)
+    except:
+        exp_str = str(exp)
+        
+    return jsonify({"success": True, "expires_at": exp_str, "days": days})
 
-    def update_status(self, message, color):
-        if hasattr(self, 'status_label'):
-            self.status_label.configure(text=message, text_color=color)
+# === КНОПКА ПОРЯТУНКУ ===
+@app.route('/admin/reset_db_force')
+def reset_db_force():
+    if not session.get('admin_logged_in'): return "Спочатку увійдіть в адмінку!", 403
+    try:
+        execute_query('DROP TABLE IF EXISTS licenses', commit=True)
+        init_database()
+        return "✅ База даних успішно перестворена!", 200
+    except Exception as e:
+        return f"Помилка: {e}", 500
 
-    def run(self):
-        self.root.mainloop()
+# Автостарт бази при запуску
+init_database()
 
-if __name__ == "__main__":
-    launcher = TIRLauncher()
-    launcher.run()
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
