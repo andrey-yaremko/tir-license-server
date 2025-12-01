@@ -1,5 +1,4 @@
-flask==2.3.3
-gunicorn==21.2.0
-psycopg2-binary==2.9.7
+Flask==3.0.0
 boto3==1.34.0
-
+psycopg2-binary==2.9.9
+Flask-Limiter==3.5.0
