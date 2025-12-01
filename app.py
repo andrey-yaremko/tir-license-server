@@ -12,7 +12,7 @@ app = Flask(__name__)
 app.secret_key = secrets.token_hex(32)
 
 # === НАЛАШТУВАННЯ ЗМІННИХ (З Railway) ===
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "Karnaval3e")  # Fallback для локальної розробки
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "Karnaval3e")
 B2_KEY_ID = os.environ.get("B2_KEY_ID")
 B2_APP_KEY = os.environ.get("B2_APP_KEY")
 B2_BUCKET_NAME = os.environ.get("B2_BUCKET_NAME")
@@ -42,21 +42,9 @@ try:
 except Exception as e:
     print(f"⚠️ B2 Error: {e}")
 
-# === ✅ ФУНКЦІЯ ДЛЯ ПЕРЕВІРКИ BOT_KEY ===
-def verify_bot_key(hwid, provided_key):
-    """Перевіряє чи правильний динамічний ключ від лаунчера"""
-    date_seed = datetime.now().strftime("%Y-%m-%d")
-    raw_key = f"TIR_SECURE_{hwid}_{date_seed}_2025"
-    expected_key = hashlib.sha256(raw_key.encode()).hexdigest()[:24]
-    return provided_key == expected_key
-
-# === РОБОТА З БАЗОЮ ДАНИХ (УНІВЕРСАЛЬНА) ===
+# === РОБОТА З БАЗОЮ ДАНИХ ===
 
 def get_db_connection():
-    """
-    ✅ ВИПРАВЛЕНО: Тепер завжди намагається підключитися до PostgreSQL
-    Якщо DATABASE_URL немає - попереджає в консолі
-    """
     database_url = os.environ.get('DATABASE_URL')
     
     if database_url:
@@ -64,7 +52,6 @@ def get_db_connection():
             import psycopg2
             from urllib.parse import urlparse
             
-            # ✅ Fix для Railway: postgres:// → postgresql://
             if database_url.startswith("postgres://"):
                 database_url = database_url.replace("postgres://", "postgresql://", 1)
             
@@ -84,21 +71,16 @@ def get_db_connection():
             print(f"⚠️ PostgreSQL помилка: {e}")
     else:
         print("⚠️ DATABASE_URL не знайдено! Дані будуть втрачені при рестарті!")
-        print("⚠️ Додайте PostgreSQL плагін в Railway!")
     
-    # Fallback на SQLite (тільки для локальної розробки)
     print("⚠️ Використовується SQLite (дані НЕ зберігаються після рестарту!)")
     return sqlite3.connect('licenses.db')
 
 def execute_query(query, params=(), fetch_one=False, fetch_all=False, commit=False):
-    """Розумна функція: автоматично адаптує запити для Postgres/SQLite"""
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    # Визначаємо тип бази даних
     is_pg = 'psycopg2' in str(type(cursor)) or 'psycopg2' in str(type(conn))
     
-    # ✅ Адаптація: Postgres використовує %s замість ?
     if is_pg:
         query = query.replace('?', '%s')
     
@@ -124,16 +106,12 @@ def execute_query(query, params=(), fetch_one=False, fetch_all=False, commit=Fal
         conn.close()
 
 def init_database():
-    """
-    ✅ ВИПРАВЛЕНО: Створення таблиць з підтримкою обох БД
-    """
     conn = get_db_connection()
     cursor = conn.cursor()
     is_pg = 'psycopg2' in str(type(cursor)) or 'psycopg2' in str(type(conn))
     
     try:
         if is_pg:
-            # PostgreSQL синтаксис
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS licenses (
                     id SERIAL PRIMARY KEY,
@@ -149,7 +127,6 @@ def init_database():
             ''')
             print("✅ PostgreSQL: Таблиця перевірена/створена")
         else:
-            # SQLite синтаксис
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS licenses (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -171,24 +148,6 @@ def init_database():
     finally:
         conn.close()
 
-# === ДІАГНОСТИЧНИЙ ЕНДПОІНТ ===
-@app.route('/debug_db')
-def debug_db():
-    """Показує який тип бази даних використовується"""
-    database_url = os.environ.get('DATABASE_URL')
-    if database_url:
-        return jsonify({
-            "status": "✅ PostgreSQL підключено",
-            "url": database_url[:40] + "...",
-            "persistent": True
-        })
-    else:
-        return jsonify({
-            "status": "⚠️ SQLite (втрачається при рестарті)",
-            "persistent": False,
-            "action": "Додайте PostgreSQL плагін в Railway!"
-        })
-
 # === АДМІНКА ===
 
 @app.route('/')
@@ -200,7 +159,7 @@ def admin_panel():
     return render_template('admin.html')
 
 @app.route('/admin/login', methods=['POST'])
-@limiter.limit("5 per minute")  # ✅ Захист від брутфорсу
+@limiter.limit("5 per minute")
 def admin_login():
     data = request.json
     password = data.get('password')
@@ -272,20 +231,16 @@ def get_stats():
     except:
         return jsonify({"total_licenses": 0, "active_licenses": 0, "activated_licenses": 0})
 
-# === КЛІЄНТСЬКІ ЗАПИТИ (ЛАУНЧЕР) ===
+# === КЛІЄНТСЬКІ ЗАПИТИ ===
 
 @app.route('/get_download_link', methods=['POST'])
-@limiter.limit("10 per minute")  # ✅ Захист від зловживання
+@limiter.limit("10 per minute")
 def get_download_link():
     data = request.json
     key = data.get('license_key')
     hwid = data.get('hwid')
-    bot_key = data.get('bot_key', '')
     
-    # ✅ Перевірка bot_key
-    if not verify_bot_key(hwid, bot_key):
-        return jsonify({"message": "Невалідний bot_key"}), 403
-    
+    # ✅ БЕЗ ПЕРЕВІРКИ BOT_KEY
     row = execute_query('SELECT hwid, status, expires_at FROM licenses WHERE license_key = ?', (key,), fetch_one=True)
     if not row: 
         return jsonify({"message": "Ліцензія не знайдена"}), 403
@@ -313,24 +268,20 @@ def get_download_link():
         url = s3_client.generate_presigned_url(
             ClientMethod='get_object',
             Params={'Bucket': B2_BUCKET_NAME, 'Key': 'TIR_Bot_Full.zip'},
-            ExpiresIn=300  # 5 хвилин
+            ExpiresIn=300
         )
         return jsonify({"download_url": url})
     except Exception as e:
-        return jsonify({"message": f"B2 Error"}), 500  # ✅ Не показуємо деталі помилки
+        return jsonify({"message": f"B2 Error"}), 500
 
 @app.route('/check_license', methods=['POST'])
-@limiter.limit("30 per minute")  # ✅ Обмеження
+@limiter.limit("30 per minute")
 def check_license():
     data = request.json
     key = data.get('license_key')
     hwid = data.get('hwid')
-    bot_key = data.get('bot_key', '')
     
-    # ✅ Перевірка bot_key (опціонально, щоб не ламати старих клієнтів)
-    if bot_key and not verify_bot_key(hwid, bot_key):
-        return jsonify({"valid": False, "message": "Невалідний bot_key"})
-    
+    # ✅ БЕЗ ПЕРЕВІРКИ BOT_KEY
     row = execute_query('SELECT id, hwid, days, expires_at, status FROM licenses WHERE license_key = ?', (key,), fetch_one=True)
     if not row: 
         return jsonify({"valid": False, "message": "Не знайдено"})
@@ -361,7 +312,6 @@ def check_license():
     
     days_left = (exp_dt - datetime.now()).days if exp_dt else days
     
-    # ✅ Безпечна конвертація дати
     expires_at_str = exp_dt.isoformat() if exp_dt else None
     
     return jsonify({
@@ -372,17 +322,13 @@ def check_license():
     })
 
 @app.route('/activate', methods=['POST'])
-@limiter.limit("5 per minute")  # ✅ Захист від спаму
+@limiter.limit("5 per minute")
 def activate_license():
     data = request.json
     key = data.get('license_key')
     hwid = data.get('hwid')
-    bot_key = data.get('bot_key', '')
     
-    # ✅ Перевірка bot_key
-    if bot_key and not verify_bot_key(hwid, bot_key):
-        return jsonify({"success": False, "message": "Невалідний bot_key"})
-    
+    # ✅ БЕЗ ПЕРЕВІРКИ BOT_KEY
     row = execute_query('SELECT id, hwid, days, status, expires_at FROM licenses WHERE license_key = ?', (key,), fetch_one=True)
     if not row: 
         return jsonify({"success": False, "message": "Невірний ключ"})
@@ -396,7 +342,6 @@ def activate_license():
     
     now = datetime.now()
     
-    # Логіка визначення дати закінчення
     if not expires_at:
         exp = now + timedelta(days=days)
         execute_query(
@@ -407,28 +352,13 @@ def activate_license():
         execute_query("UPDATE licenses SET hwid = ? WHERE id = ?", (hwid, lid), commit=True)
         exp = expires_at if isinstance(expires_at, datetime) else datetime.fromisoformat(str(expires_at))
     
-    # ✅ Безпечна конвертація
     exp_str = exp.isoformat() if isinstance(exp, datetime) else str(exp)
         
     return jsonify({"success": True, "expires_at": exp_str, "days": days})
 
-# === КНОПКА ПОРЯТУНКУ ===
-@app.route('/admin/reset_db_force')
-def reset_db_force():
-    """⚠️ УВАГА: Видаляє всі дані! Використовувати тільки для дебагу!"""
-    if not session.get('admin_logged_in'): 
-        return "Спочатку увійдіть в адмінку!", 403
-    try:
-        execute_query('DROP TABLE IF EXISTS licenses', commit=True)
-        init_database()
-        return "✅ База даних успішно перестворена!", 200
-    except Exception as e:
-        return f"Помилка: {e}", 500
-
-# ✅ Автостарт бази при запуску
+# === ІНІЦІАЛІЗАЦІЯ ===
 init_database()
 
-# ✅ Показуємо статус при запуску
 print("\n" + "="*50)
 print("🚀 TIR Bot License Server")
 print("="*50)
@@ -437,7 +367,6 @@ if database_url:
     print("✅ PostgreSQL: Дані зберігаються постійно")
 else:
     print("⚠️  SQLite: Дані втрачаються при рестарті!")
-    print("⚠️  Додайте PostgreSQL плагін в Railway!")
 print("="*50 + "\n")
 
 if __name__ == '__main__':
