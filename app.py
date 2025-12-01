@@ -16,7 +16,7 @@ ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "Karnaval3e")
 B2_KEY_ID = os.environ.get("B2_KEY_ID")
 B2_APP_KEY = os.environ.get("B2_APP_KEY")
 B2_BUCKET_NAME = os.environ.get("B2_BUCKET_NAME")
-B2_ENDPOINT = os.environ.get("B2_ENDPOINT", "https://s3.us-west-004.backblazeb2.com")
+B2_ENDPOINT = os.environ.get("B2_ENDPOINT", "https://s3.us-west-003.backblazeb2.com")
 
 # ✅ RATE LIMITING
 from flask_limiter import Limiter
@@ -372,3 +372,4 @@ print("="*50 + "\n")
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
+
