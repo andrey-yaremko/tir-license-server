@@ -12,11 +12,11 @@ app = Flask(__name__)
 app.secret_key = secrets.token_hex(32)
 
 # === НАЛАШТУВАННЯ ЗМІННИХ (З Railway) ===
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "Karnaval3e")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD")
 B2_KEY_ID = os.environ.get("B2_KEY_ID")
 B2_APP_KEY = os.environ.get("B2_APP_KEY")
 B2_BUCKET_NAME = os.environ.get("B2_BUCKET_NAME")
-B2_ENDPOINT = os.environ.get("B2_ENDPOINT", "https://s3.us-west-003.backblazeb2.com")
+B2_ENDPOINT = os.environ.get("B2_ENDPOINT")
 
 # ✅ RATE LIMITING
 from flask_limiter import Limiter
@@ -270,9 +270,22 @@ def get_download_link():
             Params={'Bucket': B2_BUCKET_NAME, 'Key': 'TIR_Bot_Full.zip'},
             ExpiresIn=300
         )
-        return jsonify({"download_url": url})
+        return jsonify({
+            "download_url": url,
+            "version": "1.0.1",
+            "file_size": "25 MB"
+        })
     except Exception as e:
         return jsonify({"message": f"B2 Error"}), 500
+
+@app.route('/get_latest_version', methods=['GET'])
+@limiter.limit("30 per minute")
+def get_latest_version():
+    return jsonify({
+        "version": "1.0.1",  # ⚠️ ЗМІНИ ЦЕ ПРИ КОЖНОМУ ОНОВЛЕННІ!
+        "release_date": "2024-01-15",
+        "changelog": "Оновлення бота"
+    })
 
 @app.route('/check_license', methods=['POST'])
 @limiter.limit("30 per minute")
@@ -372,4 +385,3 @@ print("="*50 + "\n")
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
-
